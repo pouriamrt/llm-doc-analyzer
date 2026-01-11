@@ -46,7 +46,6 @@ Output formatting rules:
 def build_user_prompt(
     doc_id: str, question_index: int, question_text: str, document_text: str
 ) -> str:
-    # Keep the “report section” feel and keep it focused on one question at a time.
     return f"""
 Document ID: {doc_id}
 
@@ -74,6 +73,6 @@ Allowed subsection labels (use only those that fit this question):
 
 Document:
 <<<BEGIN DOCUMENT
-{document_text}
+{document_text.replace("nan", "")}
 END DOCUMENT>>>
 """.strip()

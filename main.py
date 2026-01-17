@@ -1,5 +1,6 @@
 from google.adk.runners import InMemoryRunner
 from google.genai import types
+from google.adk.models.lite_llm import LiteLlm
 
 from my_agent.prompts import QUESTIONS, build_user_prompt
 from my_agent.agent import make_agent, ensure_session_exists
@@ -57,7 +58,14 @@ async def answer_document(
     document_text: str,
     out_folder: Path,
     model: str = "gemini-2.5-flash",
-) -> Path:
+    overwrite: bool = True,
+) -> tuple[Path, bool]:
+    out_path = out_folder / f"{doc_id}_report.md"
+
+    # Check if file exists and overwrite flag - skip processing if exists and overwrite is False
+    if out_path.exists() and not overwrite:
+        return (out_path, True)  # (path, was_skipped)
+
     session_id = f"session_{doc_id}"
 
     app_name = "doc_qa_fullcontext_async"
@@ -92,9 +100,8 @@ async def answer_document(
             report_parts.append("\n")
             qbar.update(1)
 
-    out_path = out_folder / f"{doc_id}_report.md"
     out_path.write_text("\n".join(report_parts).strip() + "\n", encoding="utf-8")
-    return out_path
+    return (out_path, False)  # (path, was_skipped)
 
 
 async def main() -> None:
@@ -104,7 +111,7 @@ async def main() -> None:
     out_dir = Path(os.getenv("OUT_DIR", "data/outputs"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    model = os.getenv("ADK_MODEL", "gemini-2.5-flash")
+    model = os.getenv("ADK_MODEL", LiteLlm(model="openai/gpt-5.2"))
 
     docs = load_txt_documents(docs_dir)
     if not docs:
@@ -112,19 +119,27 @@ async def main() -> None:
 
     # Concurrency across documents (questions remain sequential per document)
     max_concurrency = int(os.getenv("MAX_CONCURRENCY", "3"))
+
+    # Read overwrite flag from .env (default to True for backward compatibility)
+    overwrite_env = os.getenv("OVERWRITE", "True").strip().lower()
+    overwrite = overwrite_env in ("true", "1", "yes")
+
     sem = asyncio.Semaphore(max_concurrency)
 
     async def sem_task(doc_id: str, text: str):
         async with sem:
-            return await answer_document(doc_id, text, out_dir, model)
+            return await answer_document(doc_id, text, out_dir, model, overwrite)
 
     tasks = [
         asyncio.create_task(sem_task(doc_id, text)) for doc_id, text in docs.items()
     ]
     results = await asyncio.gather(*tasks)
 
-    for p in results:
-        print(f"Wrote: {p.resolve()}")
+    for p, was_skipped in results:
+        if was_skipped:
+            print(f"Skipped (already exists): {p.resolve()}")
+        else:
+            print(f"Wrote: {p.resolve()}")
 
     print("Done.")
 

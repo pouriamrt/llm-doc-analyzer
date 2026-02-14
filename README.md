@@ -101,6 +101,8 @@ asyncio.run(process_document())
 
 ## How It Works
 
+![Pipeline Architecture](method/diagram.png)
+
 The system processes documents through the following pipeline:
 
 1. **Document Loading**: Scans the input directory for `.txt` files

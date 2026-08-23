@@ -1,72 +1,85 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) when working in this repository.
 
-## Project Overview
+## Project overview
 
-Doc QA is an async document analysis pipeline that uses Google ADK (Agent Development Kit) to generate structured best-practice guidance reports from text documents. It answers 8 predefined questions per document using only the document's content (fail-closed: outputs "Not found in document." when unsupported).
+Doc QA is an async document analysis pipeline built on Google ADK. It answers eight fixed
+questions per document using only that document's content, and fails closed with
+`Not found in document.` when the text does not support an answer.
 
 ## Commands
 
 ```bash
-# Install dependencies
-uv sync
+uv sync --all-groups        # install runtime + dev tooling
+uv run doc-qa run           # run the pipeline
+uv run doc-qa list-docs     # list documents that would be processed
+uv run doc-qa run --dry-run # plan only, no model calls
 
-# Run the pipeline
-python main.py
-
-# Lint and format (via pre-commit)
-pre-commit run --all-files
-
-# Lint only
-ruff check --fix .
-
-# Format only
-ruff format .
+uv run ruff check --fix .   # lint
+uv run ruff format .        # format
+uv run mypy                 # strict type check (src only)
+uv run pytest               # tests, 80% coverage floor
 ```
 
-There are no tests in this project currently.
+CLI flags override environment variables, which override `.env`, which override defaults.
 
-## Environment Configuration
+## Configuration
 
-All configuration is via `.env` in the project root. Key variables:
-
-- `ADK_MODEL` - Model identifier (default: `gemini-2.5-flash`). Supports LiteLLM model strings like `openai/gpt-5.2`.
-- `DOCS_DIR` / `OUT_DIR` - Input/output directories (default: `data` / `data/outputs`)
-- `MAX_CONCURRENCY` - Parallel document limit (default: `3`)
-- `OVERWRITE` - Whether to regenerate existing reports (default: `True`)
-- `GOOGLE_API_KEY` - Required for Gemini models
-- `GOOGLE_GENAI_USE_VERTEXAI` - Set to `0` for direct API access
+`.env` in the project root; `.env.example` lists every variable. `ADK_MODEL` defaults to
+`openai/gpt-5.6-terra`. Only the API key matching the chosen provider is required, and it
+is validated at startup.
 
 ## Architecture
 
-### Processing Pipeline
-
 ```
-main.py:main() → loads .txt docs → spawns concurrent tasks (semaphore-bounded)
-  └─ answer_document() → creates ADK agent + runner + session per document
-       └─ answer_one_question() × 8 (sequential per document)
-            └─ build_user_prompt() → runner.run_async() → extract/normalize/heading
+cli.run
+ └─ run_pipeline          documents concurrent, bounded by asyncio.Semaphore
+     └─ answer_document   one ADK session per document
+         └─ ask x8        one turn per question, no retry at this level
 ```
 
-Documents are processed concurrently; the 8 questions within each document are processed sequentially to maintain conversational session state.
+- **src/doc_qa/cli.py** — Typer app, settings assembly, exit codes.
+- **src/doc_qa/config.py** — `Settings` (pydantic-settings), credential export, structlog setup.
+- **src/doc_qa/pipeline.py** — orchestration, retry policy, per-document error isolation.
+- **src/doc_qa/agent.py** — `resolve_model`, `make_agent`, `make_runner`.
+- **src/doc_qa/prompts.py** — questions, system instruction, first and follow-up builders.
+- **src/doc_qa/documents.py** — loading and cleaning.
+- **src/doc_qa/parsing.py** — ADK events to Markdown.
 
-### Module Responsibilities
+## Invariants worth preserving
 
-- **main.py** - Entry point, orchestration, async concurrency control with `asyncio.Semaphore`
-- **my_agent/agent.py** - `make_agent()` factory and `ensure_session_exists()` which handles ADK session service discovery via attribute probing (`session_service`, `_session_service`, `sessions`)
-- **my_agent/prompts.py** - `SYSTEM_INSTRUCTION`, `QUESTIONS` list, and `build_user_prompt()` template. The system instruction enforces document-only responses with specific allowed subsection labels.
-- **utils.py** - Document I/O (`load_txt_documents`), ADK event parsing (`extract_final_agent_text`), response validation (`normalize_or_fail_closed`), and heading enforcement (`ensure_q_heading`)
+- **The document is sent once per document.** `build_first_prompt` carries it; the seven
+  follow-up turns carry only the question. `tests/test_pipeline.py` asserts this; if that
+  test fails, input token cost has silently risen eightfold.
+- **`resolve_model` decides by the `/` in the model name.** `Agent(model=...)` accepts a
+  bare string only for Gemini. Every other provider needs a `LiteLlm` instance, so passing
+  a LiteLLM string through unwrapped fails at the registry lookup.
+- **`Settings.export_provider_credentials` must be called before any model call.** LiteLLM
+  and google-genai read keys from `os.environ`, not from the `Settings` object.
+- **NaN cleaning is word-boundary anchored.** A substring replace corrupts `maintenance`,
+  `governance`, `pregnancy`, `malignancies` and `unanticipated`, all of which appear in the
+  corpus.
+- **A failing document must not abort the batch.** `run_pipeline` catches per document and
+  returns a `FAILED` result rather than letting `gather` cancel its siblings.
+- **Retries live at the document level, never the turn level.** ADK commits the user
+  message to the session before the model runs (`Runner._append_user_event`), so a rate
+  limit lands after the turn is already in the history. Retrying a turn would append it
+  twice; `answer_document` retries the whole document with a fresh runner and session.
+- **`require_credentials` is called by `run`, not by the validator.** `list-docs` reaches
+  no model and must work with no provider key configured.
+- **Fail closed.** Empty model output becomes `Not found in document.`, never an empty section.
 
-### Key Design Decisions
+## ADK notes
 
-- **Fail-closed**: Empty model responses become "Not found in document." — never hallucinate.
-- **Session per document**: Each document gets its own ADK InMemoryRunner session so question context accumulates within a single document but doesn't leak across documents.
-- **Model flexibility**: The `ADK_MODEL` env var accepts both native Gemini model names and LiteLLM-prefixed strings (e.g., `openai/gpt-5.2`), with `LiteLlm` wrapper imported but model selection handled at runtime.
-- **Overwrite control**: When `OVERWRITE=False`, existing `{doc_id}_report.md` files are skipped entirely (no API calls made).
+Pinned to `google-adk >= 2.7.1`. In 2.x, `Runner` exposes `session_service` publicly and
+accepts `auto_create_session=True`, which is why no session is created by hand. ADK's own
+`RetryConfig` binds to workflow graph nodes, not to an `LlmAgent` driven by a `Runner`, so
+retries live in `pipeline.answer_document` via tenacity, at the document level for the
+reason given in the invariants above.
 
-## Code Style
+## Code style
 
-- Python 3.13+, fully async
-- Ruff for linting and formatting (configured via pre-commit, Ruff v0.14.4)
-- Type hints used throughout (`Dict`, `List`, `Path`, `tuple`)
+Python 3.13+, fully async, `from __future__ import annotations`, builtin generics. Ruff for
+lint and format, mypy strict over `src`. Tests never hit the network — a stub runner in
+`tests/conftest.py` stands in for the ADK `Runner`.

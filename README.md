@@ -1,200 +1,126 @@
-# Doc QA - Document Question Answering System
+# Doc QA
 
-A production-ready document analysis system that uses Google's Gemini AI models to generate comprehensive best-practice guidance reports from text documents. The system processes multiple documents in parallel, answering a predefined set of questions based solely on the document content.
+Generates best-practice guidance reports from text documents. Each document is answered
+against eight fixed questions, using only what the document says. When the text does not
+support an answer, the report says `Not found in document.` instead of filling the gap.
 
-## Features
+Built on [Google ADK](https://adk.dev/). Any model reachable through
+[LiteLLM](https://docs.litellm.ai/) works; the default is `openai/gpt-5.6-terra`.
 
-- 🤖 **AI-Powered Analysis**: Leverages Google Gemini models (default: `gemini-2.5-flash`) via Google ADK for intelligent document analysis
-- 📄 **Batch Processing**: Processes multiple documents concurrently with configurable parallelism
-- 🎯 **Structured Output**: Generates well-formatted Markdown reports with consistent structure
-- 🔒 **Document-Only Responses**: Strictly uses only the provided document content—no external knowledge or assumptions
-- ⚡ **Async Processing**: High-performance async/await implementation for efficient document processing
-- 📊 **Progress Tracking**: Visual progress bars for document and question processing
+## Install
 
-## Requirements
+Requires Python 3.13 or newer and [uv](https://docs.astral.sh/uv/).
 
-- Python >= 3.13
-- Google ADK credentials configured
-- Text documents in `.txt` format
-
-## Installation
-
-1. Clone the repository:
 ```bash
-git clone <repository-url>
-cd Doc_QA
+uv sync                    # runtime only
+uv sync --all-groups       # plus test and lint tooling
+cp .env.example .env       # then fill in the API key for your model
 ```
 
-2. Install dependencies using `uv` (recommended) or your preferred package manager:
+## Run
+
 ```bash
-uv sync
+uv run doc-qa run                          # process every .txt in DOCS_DIR
+uv run doc-qa run --model gemini-2.5-flash # override the model for one run
+uv run doc-qa run --no-overwrite           # leave existing reports alone
+uv run doc-qa run --dry-run                # show the plan, call nothing
+uv run doc-qa list-docs                    # what would be processed
 ```
 
-Alternatively, if using pip:
-```bash
-pip install -e .
-```
-
-3. Set up your environment variables (see [Configuration](#configuration) below)
+Every flag overrides the matching environment variable, which in turn overrides `.env`.
+The command exits non-zero if any document failed, and names the ones that did.
 
 ## Configuration
 
-Create a `.env` file in the project root with the following variables:
+| Variable | Default | Meaning |
+|---|---|---|
+| `ADK_MODEL` | `openai/gpt-5.6-terra` | Provider-prefixed names route through LiteLLM; bare names go to ADK's Gemini registry |
+| `OPENAI_API_KEY` / `GOOGLE_API_KEY` | — | Only the one matching `ADK_MODEL` is required, and it is checked at startup |
+| `DOCS_DIR` | `data` | Where the input `.txt` files live |
+| `OUT_DIR` | `data/outputs` | Where `{doc_id}_report.md` is written |
+| `MAX_CONCURRENCY` | `3` | Documents processed in parallel |
+| `OVERWRITE` | `True` | Whether to regenerate reports that already exist |
+| `MAX_ATTEMPTS` | `5` | Retries per document on rate limits and transient server errors |
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
+| `USER_ID` | `local_user` | Identifier attached to each ADK session |
+| `GOOGLE_GENAI_USE_VERTEXAI` | `0` | Set to `1` to route Gemini calls through Vertex AI |
 
-```env
-# Google ADK Configuration
-ADK_MODEL=gemini-2.5-flash  # Model to use for analysis
+## How it works
 
-# Directory Configuration
-DOCS_DIR=data                # Directory containing input .txt documents
-OUT_DIR=data/outputs         # Directory for output reports
-
-# Concurrency Configuration
-MAX_CONCURRENCY=3            # Maximum number of documents to process in parallel
-
-# User Configuration
-USER_ID=local_user           # User ID for session management
-```
-
-### Google ADK Setup
-
-This project requires Google ADK (Agent Development Kit) to be properly configured. Ensure you have:
-- Valid Google Cloud credentials
-- ADK package installed (`google-adk>=1.22.0`)
-- Appropriate API access enabled
-
-## Usage
-
-### Basic Usage
-
-1. Place your text documents (`.txt` files) in the `data/` directory (or your configured `DOCS_DIR`)
-
-2. Run the main script:
-```bash
-python main.py
-```
-
-3. Find the generated reports in the output directory (default: `data/outputs/`)
-
-### Programmatic Usage
-
-```python
-import asyncio
-from pathlib import Path
-from main import answer_document
-
-async def process_document():
-    doc_id = "my_document"
-    document_text = Path("data/my_document.txt").read_text()
-    out_folder = Path("data/outputs")
-    
-    report_path = await answer_document(
-        doc_id=doc_id,
-        document_text=document_text,
-        out_folder=out_folder,
-        model="gemini-2.5-flash"
-    )
-    print(f"Report saved to: {report_path}")
-
-asyncio.run(process_document())
-```
-
-## How It Works
-
-![Pipeline Architecture](method/diagram.png)
-
-The system processes documents through the following pipeline:
-
-1. **Document Loading**: Scans the input directory for `.txt` files
-2. **Question Processing**: For each document, answers 8 predefined questions:
-   - Definition of the practice
-   - Benefits and importance
-   - When to use
-   - When not to use (justifications)
-   - Method selection criteria
-   - Implementation guidelines
-   - Evaluation methods
-   - Alternative approaches when not used
-
-3. **AI Analysis**: Uses Google Gemini models via ADK to answer each question using only the document content
-4. **Report Generation**: Combines all answers into a structured Markdown report with consistent formatting
-5. **Output**: Saves each report as `{doc_id}_report.md` in the output directory
-
-### Key Design Principles
-
-- **Document-Only Responses**: The system is configured to use ONLY the provided document content—no external knowledge, common sense, or assumptions
-- **Fail-Closed**: If information cannot be found in the document, the system outputs "Not found in document" rather than inventing content
-- **Structured Output**: Reports follow a consistent structure with clear headings and subsections
-- **Concurrent Processing**: Multiple documents are processed in parallel for efficiency
-
-## Project Structure
+![Pipeline architecture](method/diagram.png)
 
 ```
-Doc_QA/
-├── main.py                 # Main entry point and orchestration
-├── utils.py                # Utility functions for document loading and processing
-├── my_agent/
-│   ├── __init__.py
-│   ├── agent.py            # Agent creation and session management
-│   └── prompts.py          # System instructions and question definitions
-├── data/                   # Input documents directory
-│   └── outputs/            # Generated reports directory
-├── pyproject.toml          # Project dependencies and metadata
-├── .env                    # Environment variables (create this)
-└── README.md               # This file
+cli.run
+ └─ run_pipeline            documents in parallel, bounded by a semaphore
+     └─ answer_document     one ADK session per document
+         └─ ask × 8         one turn per question
 ```
 
-## Output Format
+Documents are processed concurrently; the eight questions within a document run in order,
+because each one builds on the same session.
 
-Each generated report follows this structure:
+**The document is sent once.** The first turn carries the document and question one; the
+remaining seven carry only the question, since the session already holds the text. Sending
+it every time would multiply input tokens by eight.
+
+**Failures are contained.** A rate limit or transient server error retries the whole
+document against a fresh session, because ADK records the question in the conversation
+before the model answers, so retrying a single turn would record it twice. A document
+that still fails is reported as failed and the rest of the batch continues. Earlier
+versions lost the whole run to a single rate-limit response.
+
+**Input is cleaned on load.** The source exports contain literal `nan` cells where a
+spreadsheet had blanks. These are stripped as whole words only, because a plain substring
+replace also eats `maintenance`, `governance`, `pregnancy` and `malignancies`.
+
+## Output
 
 ```markdown
 # Best-practice guidance report
 
 ## Document: {doc_id}
 
-## Q1: What is the definition of this practice?
-[Answer with structured subsections]
-
-## Q2: Why is this practice beneficial or important?
-[Answer with structured subsections]
-
+## Q1: 1- What is the definition of this practice?
+### Definition and purpose
 ...
-
-## Q8: If it is justified to not use this practice, then what should be done as an alternative?
-[Answer with structured subsections]
 ```
 
-Reports include relevant subsections such as:
-- Key messages
-- Definition and purpose
-- Why this matters (benefits and importance)
-- When to use
-- When it may be justified not to use
-- How to select appropriate methods
-- How to implement
-- How to evaluate
-- Alternatives/mitigation steps
+Answers draw on a fixed set of subsection labels (key messages, when to use, how to
+implement, how to evaluate, and so on), and use only those the document supports.
 
-## Dependencies
+## Development
 
-- `google-adk>=1.22.0` - Google Agent Development Kit
-- `dotenv>=0.9.9` - Environment variable management
-- `tqdm>=4.67.1` - Progress bars
-- `pre-commit>=4.5.1` - Git hooks for code quality
+```bash
+uv run ruff check --fix .   # lint
+uv run ruff format .        # format
+uv run mypy                 # types, strict
+uv run pytest               # tests, 80% coverage floor
+uv run pre-commit install   # run lint and format on commit
+```
+
+No test touches the network: a stub runner stands in for the ADK `Runner`. CI runs the same
+four commands on Python 3.13 and 3.14.
+
+## Layout
+
+```
+src/doc_qa/
+  cli.py          Typer entry point
+  config.py       settings, credential export, logging
+  pipeline.py     orchestration and error isolation
+  agent.py        model resolution, agent and runner construction
+  prompts.py      questions, system instruction, prompt builders
+  documents.py    loading and cleaning
+  parsing.py      ADK events to Markdown
+tests/            unit and pipeline tests, no network
+data/             input .txt files, and outputs/ for reports
+method/           write-up of the method and the pipeline figure
+```
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+MIT. See [LICENSE](LICENSE).
 
 ## Author
 
 Pouria Mortezaagha
-
----
-
-**Note**: This system is designed to analyze documents and generate guidance reports. Ensure you have appropriate permissions and comply with data privacy regulations when processing documents.

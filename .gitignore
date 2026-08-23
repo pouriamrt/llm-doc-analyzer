@@ -17,3 +17,13 @@ data/
 test.ipynb
 
 .claude
+
+# Docs (local only)
+docs/
+
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/

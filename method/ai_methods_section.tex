@@ -63,7 +63,7 @@ This section describes the automated pipeline developed to generate structured b
 \begin{figure}[ht]
   \centering
   \includegraphics[width=\textwidth]{diagram.png}
-  \caption{Overview of the AI-assisted summary generation pipeline. Clinical trial guidance documents are loaded and encoded (left), processed through GPT-5.2 via a two-tier prompting architecture (center), passed through three automated quality-control steps (right), and saved as structured Markdown reports (far right).}
+  \caption{Overview of the AI-assisted summary generation pipeline. Clinical trial guidance documents are loaded and normalized (left), processed through GPT-5.6 Terra via a two-tier prompting architecture in which the source text is supplied once per document session (center), passed through three automated quality-control steps (right), and saved as structured Markdown reports (far right). Documents are processed concurrently; a transient provider failure retries the affected document against a fresh session, and a document that still fails is recorded as such without interrupting the remainder of the batch.}
   \label{fig:pipeline}
 \end{figure}
 
@@ -75,7 +75,7 @@ The input corpus consisted of clinical trial guidance documents in plain-text fo
 % ── 2 ──
 \subsection*{Model Selection and Configuration}
 
-Summary generation was performed using OpenAI's GPT-5.2, a large language model with strong long-context comprehension and instruction-following capabilities. The model was accessed through the LiteLLM abstraction layer integrated within the Google Agent Development Kit (ADK, version~$\geq$\,1.22.0), which provides an in-memory runner architecture for managing session state, message construction, and streamed response handling. Default inference parameters were used throughout, as output quality and structural consistency were governed by the prompting strategy detailed below. The LiteLLM integration additionally permits execution with alternative model providers, facilitating cross-model reproducibility assessment.
+Summary generation was performed using OpenAI's GPT-5.6 Terra, a large language model with a 1.05-million-token context window and strong long-context comprehension and instruction-following capabilities. The context window comfortably accommodated the largest document in the corpus (approximately 25{,}000 tokens), so no document chunking was required. The model was accessed through the LiteLLM abstraction layer integrated within the Google Agent Development Kit (ADK, version~$\geq$\,2.7.1), which provides a runner architecture with an in-memory session service for managing session state, message construction, and streamed response handling. Default inference parameters were used throughout, as output quality and structural consistency were governed by the prompting strategy detailed below. The LiteLLM integration additionally permits execution with alternative model providers, facilitating cross-model reproducibility assessment.
 
 % ── 3 ──
 \subsection*{Prompting Strategy}
@@ -91,7 +91,7 @@ The \emph{system-level} prompt established persistent behavioral constraints, sp
   \item use of a standardized set of subsection labels---including ``Key messages,'' ``Definition and purpose,'' ``How to implement,'' and ``How to evaluate''---to ensure structural uniformity.
 \end{enumerate}
 
-At the \emph{user-message} level, a parameterized template was instantiated for each query, embedding the complete document text alongside a single question. Eight standardized questions were posed for every document:
+At the \emph{user-message} level, a parameterized template was instantiated for each query. The complete document text was supplied once, in the opening turn of each document's session, together with the first question; the seven subsequent turns carried only the question and a restatement of the document-only constraint, since the session already retained the source text. This design avoids re-transmitting the document with every question, which would otherwise multiply input-token consumption by the number of questions posed. Eight standardized questions were posed for every document:
 
 \begin{enumerate}[nosep]
   \item What is the definition of this practice?
@@ -114,16 +114,18 @@ The processing pipeline was implemented as a fully asynchronous program. Documen
 Three automated post-processing steps were applied to every model response:
 
 \begin{enumerate}[nosep]
-  \item \emph{Event extraction.}\enspace The ADK runner's streamed event objects were parsed and concatenated to reconstruct a single coherent text response.
+  \item \emph{Event extraction.}\enspace The ADK runner's streamed event objects were filtered to the agent's final response, excluding partial and intermediate events, and the retained text segments were concatenated into a single coherent response.
   \item \emph{Fail-closed normalization.}\enspace Empty or null outputs were replaced with the canonical fallback string ``Not found in document,'' ensuring completeness.
   \item \emph{Heading enforcement.}\enspace The expected Markdown heading was verified and, if absent, prepended automatically to guarantee uniform report structure.
 \end{enumerate}
 
-\noindent Final reports were saved as individual Markdown files following the naming convention \texttt{\{document\_identifier\}\_report.md}. An overwrite-control flag permitted the pipeline to bypass previously completed documents on subsequent runs, eliminating redundant model invocations.
+\noindent Two mechanisms governed provider failures. First, transient errors---rate limiting and server-side faults---triggered a bounded retry with exponential backoff and jitter, applied to the document as a whole rather than to the individual question. The ADK runner commits a question to the session before the model responds, so retrying a single question would enter it into the conversation twice; each retry therefore rebuilt the runner and session and re-posed all eight questions. Second, a document that exhausted its retries was recorded as failed and excluded from the output set while the remaining documents continued to completion, with the run terminating in a non-zero status and an enumeration of the affected documents.
+
+Final reports were saved as individual Markdown files following the naming convention \texttt{\{document\_identifier\}\_report.md}. An overwrite-control flag permitted the pipeline to bypass previously completed documents on subsequent runs, eliminating redundant model invocations.
 
 % ── 5 ──
 \subsection*{Reproducibility Considerations}
 
-The full pipeline---including all prompt texts, system instructions, and post-processing logic---was maintained under Git version control. Runtime configuration parameters (model identifier, directory paths, concurrency limits, and overwrite behavior) were externalized to an environment variable file, decoupling configuration from source code. Code quality was enforced through automated linting and formatting with Ruff, integrated via pre-commit hooks. While the deterministic components of the pipeline (prompt construction, post-processing, file output) are fully reproducible, large language model inference is inherently stochastic. The standardized prompting framework and structural post-processing serve to bound the practical impact of this variability on report structure and content coverage.
+The full pipeline---including all prompt texts, system instructions, and post-processing logic---was maintained under Git version control. Runtime configuration parameters (model identifier, directory paths, concurrency limits, and overwrite behavior) were externalized to an environment variable file, decoupling configuration from source code. Runtime parameters were additionally exposed as command-line options that override the environment, so a reported run is reproducible from its invocation alone, and exact dependency versions were pinned in a lockfile. Code quality was enforced through automated linting and formatting with Ruff, static type checking with mypy in strict mode, and an automated test suite executed on every change under continuous integration; the suite substitutes a stub runner for the model and therefore issues no network requests. While the deterministic components of the pipeline (prompt construction, post-processing, file output) are fully reproducible, large language model inference is inherently stochastic. The standardized prompting framework and structural post-processing serve to bound the practical impact of this variability on report structure and content coverage.
 
 \end{document}
